@@ -170,6 +170,138 @@ function App() {
     await syncToDuckDB();
   });
 
+  // Agent Interaction API via Vite HMR Websocket
+  if ((import.meta as any).hot) {
+    (import.meta as any).hot.on('agent-request', async (data: any) => {
+      const { requestId, url, query, body } = data;
+      
+      const sendResponse = (success: boolean, payload: any, error?: string) => {
+        (import.meta as any).hot.send('agent-response', { requestId, success, payload, error });
+      };
+
+      try {
+        if (url === '/api/schema') {
+          const schemaPayload = {
+            totalRows: store.totalRows,
+            totalCols: store.totalCols,
+            columns: store.schemas.map((s, i) => ({
+              index: i,
+              letter: store.columnLetter(i),
+              name: s.name,
+              type: s.type,
+              formula: s.formula
+            }))
+          };
+
+          let markdown = `### Zen-Tabo Sheet Schema\n`;
+          markdown += `* **Dimensions**: ${store.totalRows.toLocaleString()} rows x ${store.totalCols} columns\n\n`;
+          markdown += `| Col Index | Letter | Name | Type | Formula |\n`;
+          markdown += `| --- | --- | --- | --- | --- |\n`;
+          schemaPayload.columns.forEach(c => {
+            markdown += `| ${c.index} | **${c.letter}** | ${c.name} | \`${c.type}\` | ${c.formula ? `\`${c.formula}\`` : '_None_'} |\n`;
+          });
+
+          sendResponse(true, { json: schemaPayload, markdown });
+        } 
+        
+        else if (url === '/api/query') {
+          const sql = body.sql || query.sql;
+          if (!sql) {
+            sendResponse(false, null, 'SQL query parameter is required');
+            return;
+          }
+          const result = await db.query(sql);
+
+          let markdown = '';
+          if (result.errorMessage) {
+            markdown = `**SQL Error**: ${result.errorMessage}`;
+          } else {
+            markdown = `### Query Results (${result.rows.length} rows)\n\n`;
+            if (result.columns.length > 0) {
+              markdown += `| ` + result.columns.join(' | ') + ` |\n`;
+              markdown += `| ` + result.columns.map(() => '---').join(' | ') + ` |\n`;
+              result.rows.slice(0, 100).forEach(row => {
+                markdown += `| ` + row.map(v => v === null || v === undefined ? '' : String(v)).join(' | ') + ` |\n`;
+              });
+              if (result.rows.length > 100) {
+                markdown += `\n*... showing first 100 rows of ${result.rows.length} total rows*`;
+              }
+            } else {
+              markdown += `*Empty result set*`;
+            }
+          }
+
+          sendResponse(true, { json: result, markdown });
+        } 
+        
+        else if (url === '/api/stats') {
+          const statsPayload: Record<string, any> = {};
+          store.schemas.forEach((schema, colIdx) => {
+            if (schema.type === 'number') {
+              const colStats = store.computeColumnStats(colIdx);
+              if (colStats) {
+                statsPayload[schema.name] = {
+                  count: colStats.count,
+                  mean: colStats.mean,
+                  median: colStats.median,
+                  min: colStats.min,
+                  max: colStats.max,
+                  stdDev: colStats.stdDev
+                };
+              }
+            }
+          });
+
+          let markdown = `### Column Statistics Summary\n\n`;
+          markdown += `| Column | Count | Mean | Median | Min | Max | Std Dev |\n`;
+          markdown += `| --- | --- | --- | --- | --- | --- | --- |\n`;
+          Object.entries(statsPayload).forEach(([colName, s]) => {
+            markdown += `| **${colName}** | ${s.count} | ${s.mean.toFixed(2)} | ${s.median.toFixed(2)} | ${s.min.toFixed(2)} | ${s.max.toFixed(2)} | ${s.stdDev.toFixed(2)} |\n`;
+          });
+
+          sendResponse(true, { json: statsPayload, markdown });
+        } 
+        
+        else if (url === '/api/edit') {
+          const { col, row, val, formula } = body;
+          if (col === undefined) {
+            sendResponse(false, null, 'Column index (col) is required');
+            return;
+          }
+
+          if (row !== undefined) {
+            store.setCell(row, col, formula || val || '');
+          } else {
+            store.setColumnFormula(col, formula || '');
+          }
+
+          triggerRedraw();
+          if (selectedColumn() !== null) {
+            updateStats(selectedColumn()!);
+          } else {
+            updateStats(col);
+          }
+          await syncToDuckDB();
+
+          const resultMsg = row !== undefined 
+            ? `Cell at row ${row}, col ${col} successfully updated to: ${formula || val}`
+            : `Column ${col} formula successfully updated to: ${formula}`;
+
+          sendResponse(true, { 
+            json: { success: true, message: resultMsg },
+            markdown: `**Success**: ${resultMsg}`
+          });
+        } 
+        
+        else {
+          sendResponse(false, null, `Unknown endpoint: ${url}`);
+        }
+      } catch (err) {
+        sendResponse(false, null, err instanceof Error ? err.message : String(err));
+      }
+    });
+  }
+
   return (
     <div class="app-container">
       {/* 1. Header Toolbar */}

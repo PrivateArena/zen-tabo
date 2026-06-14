@@ -209,6 +209,15 @@ export class SheetStore {
     this.evaluateAllColumns();
   }
 
+  // Set column formula dynamically and recalculate
+  public setColumnFormula(colIdx: number, formula: string) {
+    if (colIdx >= 0 && colIdx < this.totalCols) {
+      this.schemas[colIdx].formula = formula || undefined;
+      this.buildDAG();
+      this.evaluateAllColumns();
+    }
+  }
+
   // Vectorized column formula evaluation
   public evaluateAllColumns() {
     this.evaluationOrder.forEach(colIdx => {
