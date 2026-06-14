@@ -1,0 +1,65 @@
+# Ignore all
+*
+# Unignore all with extensions
+!*.*
+# Unignore all dirs
+!*/
+### Above combination will ignore all files without extension ###
+
+*.zip
+*.gz
+*.tar
+*.exe
+*.prof
+*.pprof
+*.AppImage
+*.safetensors
+*.wal
+*.shm
+*.db
+*.json3
+*.vtt
+
+node_modules/
+dist/
+.env
+*.log
+headers.json
+clones/
+workspaces/
+.gemini/
+
+.code-graph/
+codegraph/
+.zen/
+.zenmcp/
+scratch/
+map.json
+map2.json
+tools_deprecated/
+firefox-bridge/
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
