@@ -221,6 +221,12 @@ function App() {
             columnLetter: store.columnLetter
           }}
           onCellDoubleClick={handleCellDoubleClick}
+          onCellCommit={(r, c, val) => {
+            store.setCell(r, c, val);
+            triggerRedraw();
+            updateStats(c);
+            syncToDuckDB();
+          }}
         />
 
         {/* Sidebar analytics and SQL panels */}

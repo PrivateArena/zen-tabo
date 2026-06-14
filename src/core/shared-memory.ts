@@ -3,7 +3,7 @@
 // and engine locks between the UI Thread and Web Worker calculations.
 
 export class SharedGridMemory {
-  private sab: SharedArrayBuffer;
+  private sab: SharedArrayBuffer | ArrayBuffer;
   private int32View: Int32Array;
 
   // Offsets in Int32 index (4 bytes each)
@@ -16,91 +16,118 @@ export class SharedGridMemory {
   private static readonly OFF_IS_DIRTY = 6;
   private static readonly OFF_LOCK_FLAG = 7;
 
-  constructor(existingBuffer?: SharedArrayBuffer) {
+  constructor(existingBuffer?: SharedArrayBuffer | ArrayBuffer) {
     if (existingBuffer) {
       this.sab = existingBuffer;
     } else {
-      // Allocate 32KB for Control Header block
-      this.sab = new SharedArrayBuffer(32768);
+      if (typeof SharedArrayBuffer !== 'undefined') {
+        this.sab = new SharedArrayBuffer(32768);
+      } else {
+        console.warn('SharedArrayBuffer is not supported in this environment. Falling back to ArrayBuffer.');
+        this.sab = new ArrayBuffer(32768);
+      }
     }
     this.int32View = new Int32Array(this.sab);
   }
 
-  public getBuffer(): SharedArrayBuffer {
+  public getBuffer(): SharedArrayBuffer | ArrayBuffer {
     return this.sab;
+  }
+
+  private getValue(offset: number): number {
+    if (typeof SharedArrayBuffer !== 'undefined' && this.sab instanceof SharedArrayBuffer) {
+      return Atomics.load(this.int32View, offset);
+    }
+    return this.int32View[offset];
+  }
+
+  private setValue(offset: number, val: number): void {
+    if (typeof SharedArrayBuffer !== 'undefined' && this.sab instanceof SharedArrayBuffer) {
+      Atomics.store(this.int32View, offset, val);
+    } else {
+      this.int32View[offset] = val;
+    }
   }
 
   // Atomically get/set scroll X
   public get scrollX(): number {
-    return Atomics.load(this.int32View, SharedGridMemory.OFF_SCROLL_X);
+    return this.getValue(SharedGridMemory.OFF_SCROLL_X);
   }
 
   public set scrollX(val: number) {
-    Atomics.store(this.int32View, SharedGridMemory.OFF_SCROLL_X, val);
+    this.setValue(SharedGridMemory.OFF_SCROLL_X, val);
   }
 
   // Atomically get/set scroll Y
   public get scrollY(): number {
-    return Atomics.load(this.int32View, SharedGridMemory.OFF_SCROLL_Y);
+    return this.getValue(SharedGridMemory.OFF_SCROLL_Y);
   }
 
   public set scrollY(val: number) {
-    Atomics.store(this.int32View, SharedGridMemory.OFF_SCROLL_Y, val);
+    this.setValue(SharedGridMemory.OFF_SCROLL_Y, val);
   }
 
   // Atomically get/set selected column
   public get selectedCol(): number {
-    return Atomics.load(this.int32View, SharedGridMemory.OFF_SEL_COL);
+    return this.getValue(SharedGridMemory.OFF_SEL_COL);
   }
 
   public set selectedCol(val: number) {
-    Atomics.store(this.int32View, SharedGridMemory.OFF_SEL_COL, val);
+    this.setValue(SharedGridMemory.OFF_SEL_COL, val);
   }
 
   // Atomically get/set selected row
   public get selectedRow(): number {
-    return Atomics.load(this.int32View, SharedGridMemory.OFF_SEL_ROW);
+    return this.getValue(SharedGridMemory.OFF_SEL_ROW);
   }
 
   public set selectedRow(val: number) {
-    Atomics.store(this.int32View, SharedGridMemory.OFF_SEL_ROW, val);
+    this.setValue(SharedGridMemory.OFF_SEL_ROW, val);
   }
 
   // Get/set total rows
   public get totalRows(): number {
-    return Atomics.load(this.int32View, SharedGridMemory.OFF_TOTAL_ROWS);
+    return this.getValue(SharedGridMemory.OFF_TOTAL_ROWS);
   }
 
   public set totalRows(val: number) {
-    Atomics.store(this.int32View, SharedGridMemory.OFF_TOTAL_ROWS, val);
+    this.setValue(SharedGridMemory.OFF_TOTAL_ROWS, val);
   }
 
   // Get/set total cols
   public get totalCols(): number {
-    return Atomics.load(this.int32View, SharedGridMemory.OFF_TOTAL_COLS);
+    return this.getValue(SharedGridMemory.OFF_TOTAL_COLS);
   }
 
   public set totalCols(val: number) {
-    Atomics.store(this.int32View, SharedGridMemory.OFF_TOTAL_COLS, val);
+    this.setValue(SharedGridMemory.OFF_TOTAL_COLS, val);
   }
 
   // Get/set isDirty flag
   public get isDirty(): boolean {
-    return Atomics.load(this.int32View, SharedGridMemory.OFF_IS_DIRTY) === 1;
+    return this.getValue(SharedGridMemory.OFF_IS_DIRTY) === 1;
   }
 
   public set isDirty(val: boolean) {
-    Atomics.store(this.int32View, SharedGridMemory.OFF_IS_DIRTY, val ? 1 : 0);
+    this.setValue(SharedGridMemory.OFF_IS_DIRTY, val ? 1 : 0);
   }
 
   // Fast CAS lock implementation for thread synchronisation
   public lock(): void {
-    while (Atomics.compareExchange(this.int32View, SharedGridMemory.OFF_LOCK_FLAG, 0, 1) !== 0) {
-      // Spin lock - in real app we could use Atomics.wait()
+    if (typeof SharedArrayBuffer !== 'undefined' && this.sab instanceof SharedArrayBuffer) {
+      while (Atomics.compareExchange(this.int32View, SharedGridMemory.OFF_LOCK_FLAG, 0, 1) !== 0) {
+        // Spin lock
+      }
+    } else {
+      this.int32View[SharedGridMemory.OFF_LOCK_FLAG] = 1;
     }
   }
 
   public unlock(): void {
-    Atomics.store(this.int32View, SharedGridMemory.OFF_LOCK_FLAG, 0);
+    if (typeof SharedArrayBuffer !== 'undefined' && this.sab instanceof SharedArrayBuffer) {
+      Atomics.store(this.int32View, SharedGridMemory.OFF_LOCK_FLAG, 0);
+    } else {
+      this.int32View[SharedGridMemory.OFF_LOCK_FLAG] = 0;
+    }
   }
 }
