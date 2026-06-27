@@ -28,8 +28,57 @@ export class SheetStore {
   // Calculation DAG: topological order of column indices
   private evaluationOrder: number[] = [];
 
+  // Async Recalculation Worker
+  private evalWorker: Worker | null = null;
+  private evalResolve: (() => void) | null = null;
+  private debounceTimeout: any = null;
+  public onRecalculate: (() => void) | null = null;
+
   constructor() {
     this.initEmpty();
+  }
+
+  public createFloat64Array(size: number): Float64Array {
+    if (typeof SharedArrayBuffer !== 'undefined') {
+      const sab = new SharedArrayBuffer(size * 8);
+      return new Float64Array(sab);
+    }
+    return new Float64Array(size);
+  }
+
+  private initEvalWorker() {
+    if (!this.evalWorker) {
+      this.evalWorker = new Worker(
+        new URL('./eval.worker.ts', import.meta.url),
+        { type: 'module' }
+      );
+      this.evalWorker.addEventListener('message', (e) => {
+        const { type } = e.data;
+        if (type === 'EVALUATE_DONE') {
+          if (this.evalResolve) {
+            this.evalResolve();
+            this.evalResolve = null;
+          }
+          if (this.onRecalculate) {
+            this.onRecalculate();
+          }
+        }
+      });
+    }
+
+    // Send numeric columns SharedArrayBuffers to the worker
+    const cols: Record<number, SharedArrayBuffer | ArrayBuffer> = {};
+    for (let c = 0; c < this.totalCols; c++) {
+      const schema = this.schemas[c];
+      if (schema.type === 'number') {
+        const arr = this.columns[c] as Float64Array;
+        cols[c] = arr.buffer;
+      }
+    }
+    this.evalWorker.postMessage({
+      type: 'INIT_BUFFERS',
+      payload: { cols }
+    });
   }
 
   public initEmpty() {
@@ -50,7 +99,7 @@ export class SheetStore {
     for (let c = 0; c < this.totalCols; c++) {
       const schema = this.schemas[c];
       if (schema.type === 'number') {
-        this.columns.push(new Float64Array(this.totalRows));
+        this.columns.push(this.createFloat64Array(this.totalRows));
       } else {
         this.columns.push(new Array<string>(this.totalRows).fill(''));
       }
@@ -58,6 +107,7 @@ export class SheetStore {
     
     this.overrides.clear();
     this.buildDAG();
+    this.initEvalWorker();
   }
 
   // Load benchmark dataset with 100,000 rows (1,000,000 cells)
@@ -69,7 +119,7 @@ export class SheetStore {
     for (let c = 0; c < this.totalCols; c++) {
       const schema = this.schemas[c];
       if (schema.type === 'number') {
-        this.columns.push(new Float64Array(this.totalRows));
+        this.columns.push(this.createFloat64Array(this.totalRows));
       } else {
         this.columns.push(new Array<string>(this.totalRows).fill(''));
       }
@@ -99,6 +149,8 @@ export class SheetStore {
     }
 
     this.overrides.clear();
+    
+    this.initEvalWorker();
     
     // Evaluate column formulas vectorially
     this.evaluateAllColumns();
@@ -219,47 +271,25 @@ export class SheetStore {
   }
 
   // Vectorized column formula evaluation
-  public evaluateAllColumns() {
-    this.evaluationOrder.forEach(colIdx => {
-      const schema = this.schemas[colIdx];
-      if (!schema.formula) return;
+  public async evaluateAllColumns(): Promise<void> {
+    if (!this.evalWorker) return;
 
-      const dest = this.columns[colIdx] as Float64Array;
+    if (this.debounceTimeout) {
+      clearTimeout(this.debounceTimeout);
+    }
 
-      // Quick parser for formulas like "Units * Price", "Revenue * TaxRate", "Revenue - TaxAmount"
-      const parts = schema.formula.split(/\s+([\+\-\*\/])\s+/);
-      if (parts.length === 3) {
-        const colAName = parts[0].trim();
-        const op = parts[1].trim();
-        const colBName = parts[2].trim();
-
-        const colA = this.schemas.find(s => s.name === colAName);
-        const colB = this.schemas.find(s => s.name === colBName);
-
-        if (colA && colB) {
-          const arrA = this.columns[colA.index] as Float64Array;
-          const arrB = this.columns[colB.index] as Float64Array;
-
-          // SIMD style fast loop in JavaScript
-          if (op === '*') {
-            for (let r = 0; r < this.totalRows; r++) {
-              dest[r] = arrA[r] * arrB[r];
-            }
-          } else if (op === '-') {
-            for (let r = 0; r < this.totalRows; r++) {
-              dest[r] = arrA[r] - arrB[r];
-            }
-          } else if (op === '+') {
-            for (let r = 0; r < this.totalRows; r++) {
-              dest[r] = arrA[r] + arrB[r];
-            }
-          } else if (op === '/') {
-            for (let r = 0; r < this.totalRows; r++) {
-              dest[r] = arrB[r] !== 0 ? arrA[r] / arrB[r] : 0;
-            }
+    return new Promise<void>((resolve) => {
+      this.debounceTimeout = setTimeout(() => {
+        this.evalResolve = resolve;
+        this.evalWorker!.postMessage({
+          type: 'EVALUATE',
+          payload: {
+            totalRows: this.totalRows,
+            evaluationOrder: this.evaluationOrder,
+            schemas: this.schemas
           }
-        }
-      }
+        });
+      }, 16);
     });
   }
 
@@ -305,21 +335,45 @@ export class SheetStore {
     return letter.charCodeAt(0) - 65;
   }
 
-  // Get Table structure as plain objects array for DuckDB import
-  public getTableData(): any[] {
-    const data: any[] = [];
-    // Limit export size to DuckDB for high performance, e.g. first 20,000 rows
-    const exportLimit = Math.min(this.totalRows, 25000);
-    
-    for (let r = 0; r < exportLimit; r++) {
-      const rowObj: any = {};
-      for (let c = 0; c < this.totalCols; c++) {
-        const cell = this.getCell(r, c);
-        rowObj[this.schemas[c].name] = cell.value;
+  // Get Table structure as a Record of arrays for DuckDB Arrow import
+  public getArrowColumns(): Record<string, Float64Array | string[]> {
+    const result: Record<string, Float64Array | string[]> = {};
+    for (let c = 0; c < this.totalCols; c++) {
+      const schema = this.schemas[c];
+      if (schema.type === 'number') {
+        const arr = new Float64Array(this.columns[c] as Float64Array);
+        // Apply overrides
+        for (const [key, override] of this.overrides.entries()) {
+          const [colStr, rowStr] = key.split(',');
+          if (parseInt(colStr) === c) {
+            const r = parseInt(rowStr);
+            if (override.formula) {
+              const evaluated = this.evaluateCellFormula(override.formula);
+              arr[r] = typeof evaluated === 'number' ? evaluated : parseFloat(String(evaluated)) || 0;
+            } else if (override.value !== undefined) {
+              arr[r] = typeof override.value === 'number' ? override.value : parseFloat(String(override.value)) || 0;
+            }
+          }
+        }
+        result[schema.name] = arr;
+      } else {
+        const arr = [...(this.columns[c] as string[])];
+        // Apply overrides
+        for (const [key, override] of this.overrides.entries()) {
+          const [colStr, rowStr] = key.split(',');
+          if (parseInt(colStr) === c) {
+            const r = parseInt(rowStr);
+            if (override.formula) {
+              arr[r] = String(this.evaluateCellFormula(override.formula));
+            } else if (override.value !== undefined) {
+              arr[r] = String(override.value);
+            }
+          }
+        }
+        result[schema.name] = arr;
       }
-      data.push(rowObj);
     }
-    return data;
+    return result;
   }
 
   // High performance vectorized Welford statistics computation

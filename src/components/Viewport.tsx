@@ -42,24 +42,18 @@ export const Viewport: Component<ViewportProps> = (props) => {
 
   let ctx: CanvasRenderingContext2D | null = null;
 
+  let rafId: number | null = null;
+
   // Redraw helper
   const redraw = () => {
-    if (!ctx || !canvasRef) return;
-    const rect = containerRef.getBoundingClientRect();
-    
-    // Set canvas dimensions considering high DPI screens
-    const dpr = window.devicePixelRatio || 1;
-    canvasRef.width = rect.width * dpr;
-    canvasRef.height = rect.height * dpr;
-    
-    ctx.scale(dpr, dpr);
-    canvasRef.style.width = `${rect.width}px`;
-    canvasRef.style.height = `${rect.height}px`;
+    if (!ctx || !canvasRef || !containerRef) return;
+    const w = containerRef.clientWidth;
+    const h = containerRef.clientHeight;
 
     drawGrid(
       ctx,
-      rect.width,
-      rect.height,
+      w,
+      h,
       props.scrollX(),
       props.scrollY(),
       props.selectedCell(),
@@ -67,6 +61,29 @@ export const Viewport: Component<ViewportProps> = (props) => {
       props.dims,
       props.data
     );
+  };
+
+  const requestRedraw = () => {
+    if (rafId !== null) return;
+    rafId = requestAnimationFrame(() => {
+      rafId = null;
+      redraw();
+    });
+  };
+
+  const resizeCanvas = () => {
+    if (!ctx || !canvasRef || !containerRef) return;
+    const rect = containerRef.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    
+    canvasRef.width = rect.width * dpr;
+    canvasRef.height = rect.height * dpr;
+    canvasRef.style.width = `${rect.width}px`;
+    canvasRef.style.height = `${rect.height}px`;
+    
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    
+    redraw();
   };
 
   // Sync scroll from sentinel to signals
@@ -256,9 +273,12 @@ export const Viewport: Component<ViewportProps> = (props) => {
   onMount(() => {
     ctx = canvasRef.getContext('2d');
     
+    // Perform initial canvas sizing
+    resizeCanvas();
+
     // Resize Observer for responsive resizing
     const resizeObserver = new ResizeObserver(() => {
-      redraw();
+      resizeCanvas();
     });
     resizeObserver.observe(containerRef);
 
@@ -272,12 +292,21 @@ export const Viewport: Component<ViewportProps> = (props) => {
       resizeObserver.disconnect();
       canvasRef.removeEventListener('wheel', handleWheel);
       window.removeEventListener('keydown', handleKeyDown);
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+      }
     });
   });
 
   // Re-run draw when scroll offsets, selections, or dimensions update
   createEffect(() => {
-    redraw();
+    // Register signals as dependencies
+    props.scrollX();
+    props.scrollY();
+    props.selectedCell();
+    props.selectedColumn();
+    
+    requestRedraw();
   });
 
   return (

@@ -1,5 +1,6 @@
-import { createSignal, onMount, Show } from 'solid-js';
+import { createSignal, onMount, onCleanup, Show } from 'solid-js';
 import { Toolbar } from './components/Toolbar';
+import { UndoStack } from './core/history';
 import { FormulaBar } from './components/FormulaBar';
 import { Sidebar } from './components/Sidebar';
 import type { ColumnStats, SQLResult } from './components/Sidebar';
@@ -14,6 +15,20 @@ function App() {
   const store = new SheetStore();
   const db = new DbEngine();
   const sharedMem = new SharedGridMemory();
+
+  // Register async recalculation listener
+  store.onRecalculate = () => {
+    setTriggerRedraw(prev => prev + 1);
+    
+    // Update stats for the active column if we have one selected
+    const col = selectedColumn();
+    if (col !== null) {
+      updateStats(col);
+    }
+    
+    // Sync the newly calculated results to DuckDB
+    syncToDuckDB();
+  };
 
   // Scroll and selection signals
   const [scrollX, _setScrollX] = createSignal(0);
@@ -65,6 +80,11 @@ function App() {
   const [formulaText, setFormulaText] = createSignal('');
   const [triggerRedraw, setTriggerRedraw] = createSignal(0);
 
+  // Undo/Redo tracking
+  const history = new UndoStack();
+  const [canUndo, setCanUndo] = createSignal(false);
+  const [canRedo, setCanRedo] = createSignal(false);
+
   // Statistics & SQL signals
   const [stats, setStats] = createSignal<ColumnStats | null>(null);
   const [sqlQuery, setSqlQuery] = createSignal('SELECT Product, ROUND(SUM(Revenue), 2) AS Total_Rev, COUNT(*) AS Sales_Count FROM active_sheet GROUP BY Product ORDER BY Total_Rev DESC;');
@@ -77,32 +97,93 @@ function App() {
     setStats(s);
   };
 
-  // Formula bar submit
-  const handleFormulaSubmit = () => {
-    const cell = selectedCell();
-    if (!cell) return;
+  // Perform cell change with undo/redo capability
+  const setCellWithHistory = (row: number, col: number, text: string) => {
+    const override = store.overrides.get(`${col},${row}`);
+    const prevText = override ? (override.formula || String(override.value ?? '')) : String(store.columns[col][row] ?? '');
 
-    store.setCell(cell.row, cell.col, formulaText());
-    
-    // Trigger redraw and stats updates
+    store.setCell(row, col, text);
+
+    history.push({
+      type: 'SET_CELL',
+      row,
+      col,
+      prevText,
+      nextText: text
+    });
+
+    setCanUndo(history.canUndo());
+    setCanRedo(history.canRedo());
+
     setTriggerRedraw(prev => prev + 1);
     
     if (selectedColumn() !== null) {
       updateStats(selectedColumn()!);
     } else {
-      updateStats(cell.col);
+      updateStats(col);
     }
 
-    // Sync to DuckDB background
+    const cell = selectedCell();
+    if (cell && cell.row === row && cell.col === col) {
+      setSelectedCell(cell);
+    }
+
     syncToDuckDB();
+  };
+
+  const handleUndo = () => {
+    const cmd = history.undo();
+    if (cmd && cmd.type === 'SET_CELL') {
+      store.setCell(cmd.row, cmd.col, cmd.prevText);
+      setCanUndo(history.canUndo());
+      setCanRedo(history.canRedo());
+      setTriggerRedraw(prev => prev + 1);
+      if (selectedColumn() !== null) {
+        updateStats(selectedColumn()!);
+      } else {
+        updateStats(cmd.col);
+      }
+      const cell = selectedCell();
+      if (cell && cell.row === cmd.row && cell.col === cmd.col) {
+        setSelectedCell(cell);
+      }
+      syncToDuckDB();
+    }
+  };
+
+  const handleRedo = () => {
+    const cmd = history.redo();
+    if (cmd && cmd.type === 'SET_CELL') {
+      store.setCell(cmd.row, cmd.col, cmd.nextText);
+      setCanUndo(history.canUndo());
+      setCanRedo(history.canRedo());
+      setTriggerRedraw(prev => prev + 1);
+      if (selectedColumn() !== null) {
+        updateStats(selectedColumn()!);
+      } else {
+        updateStats(cmd.col);
+      }
+      const cell = selectedCell();
+      if (cell && cell.row === cmd.row && cell.col === cmd.col) {
+        setSelectedCell(cell);
+      }
+      syncToDuckDB();
+    }
+  };
+
+  // Formula bar submit
+  const handleFormulaSubmit = () => {
+    const cell = selectedCell();
+    if (!cell) return;
+    setCellWithHistory(cell.row, cell.col, formulaText());
   };
 
   // Sync current sheet data to DuckDB-Wasm
   const syncToDuckDB = async () => {
     setIsDbLoading(true);
     try {
-      const tableData = store.getTableData();
-      await db.registerTable('active_sheet', tableData);
+      const columns = store.getArrowColumns();
+      await db.registerTable('active_sheet', columns);
     } catch (err) {
       console.error('Failed to sync to DuckDB', err);
     } finally {
@@ -168,6 +249,26 @@ function App() {
     
     // Initial sync
     await syncToDuckDB();
+
+    // Setup global undo/redo hotkeys
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        return;
+      }
+      if (e.ctrlKey || e.metaKey) {
+        if (e.key === 'z' || e.key === 'Z') {
+          e.preventDefault();
+          handleUndo();
+        } else if (e.key === 'y' || e.key === 'Y') {
+          e.preventDefault();
+          handleRedo();
+        }
+      }
+    };
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    onCleanup(() => {
+      window.removeEventListener('keydown', handleGlobalKeyDown);
+    });
   });
 
   // Agent Interaction API via Vite HMR Websocket
@@ -313,6 +414,10 @@ function App() {
         rowCount={() => store.totalRows}
         colCount={() => store.totalCols}
         onImportMock={handleLoadMock}
+        canUndo={canUndo}
+        canRedo={canRedo}
+        onUndo={handleUndo}
+        onRedo={handleRedo}
       />
 
       {/* 2. Formula Bar */}
@@ -354,10 +459,7 @@ function App() {
           }}
           onCellDoubleClick={handleCellDoubleClick}
           onCellCommit={(r, c, val) => {
-            store.setCell(r, c, val);
-            triggerRedraw();
-            updateStats(c);
-            syncToDuckDB();
+            setCellWithHistory(r, c, val);
           }}
         />
 

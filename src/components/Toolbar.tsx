@@ -8,6 +8,10 @@ interface ToolbarProps {
   rowCount: Accessor<number>;
   colCount: Accessor<number>;
   onImportMock: () => void;
+  canUndo: Accessor<boolean>;
+  canRedo: Accessor<boolean>;
+  onUndo: () => void;
+  onRedo: () => void;
 }
 
 export const Toolbar: Component<ToolbarProps> = (props) => {
@@ -32,6 +36,36 @@ export const Toolbar: Component<ToolbarProps> = (props) => {
       </div>
       
       <div class="toolbar-right">
+        <button 
+          class="toolbar-btn" 
+          disabled={!props.canUndo()}
+          onClick={props.onUndo}
+          title="Undo (Ctrl+Z)"
+          style={{ opacity: props.canUndo() ? 1 : 0.4, cursor: props.canUndo() ? 'pointer' : 'not-allowed' }}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="1 4 1 10 7 10"/>
+            <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
+          </svg>
+          Undo
+        </button>
+
+        <button 
+          class="toolbar-btn" 
+          disabled={!props.canRedo()}
+          onClick={props.onRedo}
+          title="Redo (Ctrl+Y)"
+          style={{ opacity: props.canRedo() ? 1 : 0.4, cursor: props.canRedo() ? 'pointer' : 'not-allowed' }}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="23 4 23 10 17 10"/>
+            <path d="M20.49 15a9 9 0 1 1-2.13-9.36L23 10"/>
+          </svg>
+          Redo
+        </button>
+
+        <div class="toolbar-divider" style="width: 1px; height: 16px; background: rgba(255,255,255,0.1); margin: 0 8px;"></div>
+
         <button 
           class="toolbar-btn" 
           onClick={props.onImportMock}

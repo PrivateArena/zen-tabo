@@ -14,7 +14,6 @@ export class SharedGridMemory {
   private static readonly OFF_TOTAL_ROWS = 4;
   private static readonly OFF_TOTAL_COLS = 5;
   private static readonly OFF_IS_DIRTY = 6;
-  private static readonly OFF_LOCK_FLAG = 7;
 
   constructor(existingBuffer?: SharedArrayBuffer | ArrayBuffer) {
     if (existingBuffer) {
@@ -112,22 +111,4 @@ export class SharedGridMemory {
     this.setValue(SharedGridMemory.OFF_IS_DIRTY, val ? 1 : 0);
   }
 
-  // Fast CAS lock implementation for thread synchronisation
-  public lock(): void {
-    if (typeof SharedArrayBuffer !== 'undefined' && this.sab instanceof SharedArrayBuffer) {
-      while (Atomics.compareExchange(this.int32View, SharedGridMemory.OFF_LOCK_FLAG, 0, 1) !== 0) {
-        // Spin lock
-      }
-    } else {
-      this.int32View[SharedGridMemory.OFF_LOCK_FLAG] = 1;
-    }
-  }
-
-  public unlock(): void {
-    if (typeof SharedArrayBuffer !== 'undefined' && this.sab instanceof SharedArrayBuffer) {
-      Atomics.store(this.int32View, SharedGridMemory.OFF_LOCK_FLAG, 0);
-    } else {
-      this.int32View[SharedGridMemory.OFF_LOCK_FLAG] = 0;
-    }
-  }
 }

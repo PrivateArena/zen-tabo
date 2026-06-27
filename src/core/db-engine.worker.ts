@@ -1,4 +1,5 @@
 import * as duckdb from '@duckdb/duckdb-wasm';
+import { tableFromArrays } from 'apache-arrow';
 
 const DUCKDB_VERSION = '1.28.0'; // Pinned stable version
 const CDN_BASE = `https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@${DUCKDB_VERSION}/dist`;
@@ -54,67 +55,47 @@ async function runQuery(sql: string): Promise<Record<string, unknown>[]> {
   );
 }
 
-async function registerTable(name: string, data: any[]): Promise<void> {
+async function registerTable(name: string, columns: Record<string, Float64Array | string[]>): Promise<void> {
   if (!conn || !db) throw new Error('Database is not initialised');
   
   // Drop table if exists
   await conn.query(`DROP TABLE IF EXISTS ${name}`);
   
-  if (data.length === 0) return;
+  if (Object.keys(columns).length === 0) return;
   
-  // Create and insert table data
-  // Extract schema
-  const first = data[0];
-  const columns = Object.keys(first);
-  const types = columns.map(col => {
-    const val = first[col];
-    if (typeof val === 'number') {
-      return `${col} DOUBLE`;
-    }
-    return `${col} VARCHAR`;
-  });
+  // Create Arrow table from arrays
+  const arrowTable = tableFromArrays(columns);
   
-  await conn.query(`CREATE TABLE ${name} (${types.join(', ')})`);
-  
-  // Insert in batches of 10,000 for high performance
-  const batchSize = 10000;
-  for (let i = 0; i < data.length; i += batchSize) {
-    const batch = data.slice(i, i + batchSize);
-    const valuesList = batch.map(row => {
-      const vals = columns.map(col => {
-        const val = row[col];
-        if (val === null || val === undefined) return 'NULL';
-        if (typeof val === 'number') return String(val);
-        return `'${String(val).replace(/'/g, "''")}'`;
-      });
-      return `(${vals.join(', ')})`;
-    });
-    
-    await conn.query(`INSERT INTO ${name} VALUES ${valuesList.join(', ')}`);
-  }
+  // Insert table
+  await conn.insertArrowTable(arrowTable as any, { name, create: true });
 }
 
-self.onmessage = async (event: MessageEvent) => {
-  const { type, payload } = event.data;
+// Request Queue to serialize database operations
+const queue: Array<{ id: string; type: string; payload: any }> = [];
+let busy = false;
+
+async function processQueue() {
+  if (busy || queue.length === 0) return;
+  busy = true;
   
-  if (!initPromise) {
-    initPromise = initDuckDB().then(() => {
-      self.postMessage({ type: 'READY' });
-    });
-  }
+  const request = queue.shift()!;
+  const { id, type, payload } = request;
   
   try {
-    await initPromise;
+    if (initPromise) {
+      await initPromise;
+    }
     
     if (type === 'REGISTER_TABLE') {
-      await registerTable(payload.name, payload.data);
-      self.postMessage({ type: 'TABLE_REGISTERED', name: payload.name });
+      await registerTable(payload.name, payload.columns);
+      self.postMessage({ type: 'TABLE_REGISTERED', id, name: payload.name });
     } else if (type === 'QUERY') {
       const startTime = performance.now();
       const rows = await runQuery(payload.sql);
       const endTime = performance.now();
       self.postMessage({ 
         type: 'RESULT', 
+        id,
         rows, 
         executionTimeMs: endTime - startTime 
       });
@@ -122,7 +103,27 @@ self.onmessage = async (event: MessageEvent) => {
   } catch (err) {
     self.postMessage({ 
       type: 'ERROR', 
+      id,
       message: err instanceof Error ? err.message : String(err) 
     });
+  } finally {
+    busy = false;
+    processQueue();
   }
+}
+
+self.onmessage = (event: MessageEvent) => {
+  const { type, id, payload } = event.data;
+  
+  if (type === 'INIT') {
+    if (!initPromise) {
+      initPromise = initDuckDB().then(() => {
+        self.postMessage({ type: 'READY' });
+      });
+    }
+    return;
+  }
+  
+  queue.push({ id, type, payload });
+  processQueue();
 };

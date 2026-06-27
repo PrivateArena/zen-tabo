@@ -8,8 +8,11 @@ export interface SQLResult {
 export class DbEngine {
   private worker: Worker;
   private readyPromise: Promise<void>;
-  private queryResolve: ((res: SQLResult) => void) | null = null;
-  private registerResolve: (() => void) | null = null;
+  private pendingRequests = new Map<string, { 
+    resolve: (res: any) => void;
+    reject: (err: Error) => void;
+  }>();
+  private nextRequestId = 0;
 
   constructor() {
     // Instantiate the worker using Vite's URL asset protocol
@@ -41,56 +44,55 @@ export class DbEngine {
     return this.readyPromise;
   }
 
-  public async registerTable(name: string, data: any[]): Promise<void> {
+  public async registerTable(name: string, columns: Record<string, Float64Array | string[]>): Promise<void> {
     await this.readyPromise;
-    return new Promise<void>((resolve) => {
-      this.registerResolve = resolve;
+    return new Promise<void>((resolve, reject) => {
+      const id = String(this.nextRequestId++);
+      this.pendingRequests.set(id, { resolve, reject });
       this.worker.postMessage({
         type: 'REGISTER_TABLE',
-        payload: { name, data }
+        id,
+        payload: { name, columns }
       });
     });
   }
 
   public async query(sql: string): Promise<SQLResult> {
     await this.readyPromise;
-    return new Promise<SQLResult>((resolve) => {
-      this.queryResolve = resolve;
+    return new Promise<SQLResult>((resolve, reject) => {
+      const id = String(this.nextRequestId++);
+      this.pendingRequests.set(id, { resolve, reject });
       this.worker.postMessage({
         type: 'QUERY',
+        id,
         payload: { sql }
       });
     });
   }
 
   private handleMessage(e: MessageEvent): void {
-    const { type, rows, executionTimeMs, message } = e.data;
-    
+    const { type, id, rows, executionTimeMs, message } = e.data;
+    const pending = this.pendingRequests.get(id);
+    if (!pending) return;
+
+    this.pendingRequests.delete(id);
+
     if (type === 'TABLE_REGISTERED') {
-      if (this.registerResolve) {
-        this.registerResolve();
-        this.registerResolve = null;
-      }
+      pending.resolve(undefined);
     } else if (type === 'RESULT') {
-      if (this.queryResolve) {
-        if (rows.length === 0) {
-          this.queryResolve({ columns: [], rows: [], executionTimeMs });
-        } else {
-          const columns = Object.keys(rows[0]);
-          const rowData = rows.map((row: any) => columns.map(col => row[col]));
-          this.queryResolve({ columns, rows: rowData, executionTimeMs });
-        }
-        this.queryResolve = null;
+      if (rows.length === 0) {
+        pending.resolve({ columns: [], rows: [], executionTimeMs });
+      } else {
+        const columns = Object.keys(rows[0]);
+        const rowData = rows.map((row: any) => columns.map(col => row[col]));
+        pending.resolve({ columns, rows: rowData, executionTimeMs });
       }
     } else if (type === 'ERROR') {
-      if (this.queryResolve) {
-        this.queryResolve({
-          columns: [],
-          rows: [],
-          errorMessage: message
-        });
-        this.queryResolve = null;
-      }
+      pending.resolve({
+        columns: [],
+        rows: [],
+        errorMessage: message
+      });
     }
   }
 
