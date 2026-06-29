@@ -1,7 +1,8 @@
-import { createEffect, onMount, onCleanup, createSignal, Show } from 'solid-js';
+import { createEffect, onMount, onCleanup, createSignal, Show, For } from 'solid-js';
 import type { Component, Accessor } from 'solid-js';
 import { drawGrid } from '../renderer/canvas-fallback';
-import type { GridDimension, GridDataSource, SelectedCell } from '../renderer/canvas-fallback';
+import type { GridDimension, GridDataSource, SelectedCell, CellRange } from '../renderer/canvas-fallback';
+import type { ColumnSchema } from '../core/sheet-store';
 
 interface ViewportProps {
   scrollX: Accessor<number>;
@@ -12,10 +13,17 @@ interface ViewportProps {
   setSelectedCell: (cell: SelectedCell | null) => void;
   selectedColumn: Accessor<number | null>;
   setSelectedColumn: (col: number | null) => void;
+  selectionRange: Accessor<CellRange | null>;
+  setSelectionRange: (range: CellRange | null) => void;
   dims: GridDimension;
   data: GridDataSource;
   onCellDoubleClick: (row: number, col: number) => void;
   onCellCommit?: (row: number, col: number, value: string) => void;
+  schemas: ColumnSchema[];
+  getAggregate: (colIdx: number, op: string | undefined) => any;
+  onSetColumnAggregate: (colIdx: number, op: any) => void;
+  showWizard: Accessor<boolean>;
+  setShowWizard: (val: boolean) => void;
 }
 
 export const Viewport: Component<ViewportProps> = (props) => {
@@ -25,6 +33,8 @@ export const Viewport: Component<ViewportProps> = (props) => {
   let scrollSentinelXRef!: HTMLDivElement;
 
   const [editingCell, setEditingCell] = createSignal<{ row: number; col: number; val: string } | null>(null);
+  const [isDragging, setIsDragging] = createSignal(false);
+  const [contextMenu, setContextMenu] = createSignal<{ x: number; y: number; row: number; col: number } | null>(null);
 
   const commitEditing = () => {
     const edit = editingCell();
@@ -41,14 +51,20 @@ export const Viewport: Component<ViewportProps> = (props) => {
   const totalGridHeight = props.dims.totalRows * rowHeight + props.dims.headerHeight;
 
   let ctx: CanvasRenderingContext2D | null = null;
-
   let rafId: number | null = null;
+
+  const formatValue = (v: any) => {
+    if (v === undefined || v === null || v === '') return '';
+    const n = Number(v);
+    if (isNaN(n)) return String(v);
+    return Number.isInteger(n) ? String(n) : n.toFixed(2);
+  };
 
   // Redraw helper
   const redraw = () => {
     if (!ctx || !canvasRef || !containerRef) return;
     const w = containerRef.clientWidth;
-    const h = containerRef.clientHeight;
+    const h = containerRef.clientHeight - 28; // Adjust for aggregate footer
 
     drawGrid(
       ctx,
@@ -59,7 +75,8 @@ export const Viewport: Component<ViewportProps> = (props) => {
       props.selectedCell(),
       props.selectedColumn(),
       props.dims,
-      props.data
+      props.data,
+      props.selectionRange()
     );
   };
 
@@ -78,13 +95,120 @@ export const Viewport: Component<ViewportProps> = (props) => {
     const dpr = window.devicePixelRatio || 1;
     
     canvasRef.width = rect.width * dpr;
-    canvasRef.height = rect.height * dpr;
+    canvasRef.height = (rect.height - 28) * dpr;
     canvasRef.style.width = `${rect.width}px`;
-    canvasRef.style.height = `${rect.height}px`;
+    canvasRef.style.height = `${rect.height - 28}px`;
     
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     
     redraw();
+  };
+
+  const getCellFromEvent = (e: MouseEvent): { row: number; col: number } | null => {
+    const rect = canvasRef.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    const { headerWidth, headerHeight } = props.dims;
+
+    if (x >= headerWidth && y >= headerHeight) {
+      const col = Math.floor((x - headerWidth + props.scrollX()) / defaultColWidth);
+      const row = Math.floor((y - headerHeight + props.scrollY()) / rowHeight);
+      
+      if (col >= 0 && col < props.dims.totalCols && row >= 0 && row < props.dims.totalRows) {
+        return { row, col };
+      }
+    }
+    return null;
+  };
+
+  // Drag selection mouse event handlers
+  const handleMouseDown = (e: MouseEvent) => {
+    if (e.button !== 0) return; // Left click only
+    setContextMenu(null);
+
+    const cell = getCellFromEvent(e);
+    if (cell) {
+      setIsDragging(true);
+      props.setSelectedColumn(null);
+      props.setSelectedCell(cell);
+      props.setSelectionRange({
+        startRow: cell.row,
+        startCol: cell.col,
+        endRow: cell.row,
+        endCol: cell.col
+      });
+    } else {
+      const rect = canvasRef.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      const { headerWidth, headerHeight } = props.dims;
+
+      if (y < headerHeight && x >= headerWidth) {
+        const col = Math.floor((x - headerWidth + props.scrollX()) / defaultColWidth);
+        if (col >= 0 && col < props.dims.totalCols) {
+          props.setSelectedColumn(col);
+          props.setSelectedCell({ row: 0, col });
+          props.setSelectionRange({ startRow: 0, startCol: col, endRow: props.dims.totalRows - 1, endCol: col });
+        }
+      } else if (x < headerWidth && y >= headerHeight) {
+        const row = Math.floor((y - headerHeight + props.scrollY()) / rowHeight);
+        if (row >= 0 && row < props.dims.totalRows) {
+          props.setSelectedColumn(null);
+          props.setSelectedCell({ row, col: 0 });
+          props.setSelectionRange({ startRow: row, startCol: 0, endRow: row, endCol: props.dims.totalCols - 1 });
+        }
+      }
+    }
+  };
+
+  const handleMouseMove = (e: MouseEvent) => {
+    if (!isDragging()) return;
+    const cell = getCellFromEvent(e);
+    if (cell) {
+      const current = props.selectionRange();
+      if (current) {
+        props.setSelectionRange({
+          ...current,
+          endRow: cell.row,
+          endCol: cell.col
+        });
+      }
+    }
+  };
+
+  const handleMouseUp = () => {
+    setIsDragging(false);
+  };
+
+  const handleContextMenu = (e: MouseEvent) => {
+    e.preventDefault();
+    const cell = getCellFromEvent(e);
+    if (cell) {
+      const range = props.selectionRange();
+      const inRange = range &&
+        cell.row >= Math.min(range.startRow, range.endRow) &&
+        cell.row <= Math.max(range.startRow, range.endRow) &&
+        cell.col >= Math.min(range.startCol, range.endCol) &&
+        cell.col <= Math.max(range.startCol, range.endCol);
+
+      if (!inRange) {
+        props.setSelectedCell(cell);
+        props.setSelectionRange({
+          startRow: cell.row,
+          startCol: cell.col,
+          endRow: cell.row,
+          endCol: cell.col
+        });
+      }
+
+      setContextMenu({
+        x: e.clientX,
+        y: e.clientY,
+        row: cell.row,
+        col: cell.col
+      });
+    }
   };
 
   // Sync scroll from sentinel to signals
@@ -117,40 +241,6 @@ export const Viewport: Component<ViewportProps> = (props) => {
     }
   });
 
-  // Handle click events on Grid
-  const handleCanvasClick = (e: MouseEvent) => {
-    const rect = canvasRef.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-
-    const { headerWidth, headerHeight } = props.dims;
-
-    if (y < headerHeight && x >= headerWidth) {
-      // Clicked column header
-      const clickedCol = Math.floor((x - headerWidth + props.scrollX()) / defaultColWidth);
-      if (clickedCol >= 0 && clickedCol < props.dims.totalCols) {
-        props.setSelectedColumn(clickedCol);
-        props.setSelectedCell({ row: 0, col: clickedCol }); // Focus top cell
-      }
-    } else if (x < headerWidth && y >= headerHeight) {
-      // Clicked row header
-      const clickedRow = Math.floor((y - headerHeight + props.scrollY()) / rowHeight);
-      if (clickedRow >= 0 && clickedRow < props.dims.totalRows) {
-        props.setSelectedColumn(null);
-        props.setSelectedCell({ row: clickedRow, col: 0 }); // Focus first cell of row
-      }
-    } else if (x >= headerWidth && y >= headerHeight) {
-      // Clicked grid cell
-      const col = Math.floor((x - headerWidth + props.scrollX()) / defaultColWidth);
-      const row = Math.floor((y - headerHeight + props.scrollY()) / rowHeight);
-      
-      if (col >= 0 && col < props.dims.totalCols && row >= 0 && row < props.dims.totalRows) {
-        props.setSelectedColumn(null);
-        props.setSelectedCell({ row, col });
-      }
-    }
-  };
-
   // Handle double-click to edit cell inline
   const handleCanvasDoubleClick = (e: MouseEvent) => {
     const rect = canvasRef.getBoundingClientRect();
@@ -177,7 +267,7 @@ export const Viewport: Component<ViewportProps> = (props) => {
     const scrollDeltaX = e.deltaX;
 
     const rect = containerRef.getBoundingClientRect();
-    const maxScrollY = Math.max(0, totalGridHeight - rect.height);
+    const maxScrollY = Math.max(0, totalGridHeight - (rect.height - 28));
     const maxScrollX = Math.max(0, totalGridWidth - rect.width);
 
     const newScrollY = Math.max(0, Math.min(props.scrollY() + scrollDeltaY, maxScrollY));
@@ -204,7 +294,6 @@ export const Viewport: Component<ViewportProps> = (props) => {
       return;
     }
 
-    // Enter / F2 starts editing
     if (e.key === 'Enter' || e.key === 'F2') {
       const cellData = props.data.getCell(cell.row, cell.col);
       setEditingCell({ row: cell.row, col: cell.col, val: cellData ? String(cellData.value) : '' });
@@ -212,7 +301,6 @@ export const Viewport: Component<ViewportProps> = (props) => {
       return;
     }
 
-    // Alphanumeric keys start editing and overwrite cell content
     if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
       setEditingCell({ row: cell.row, col: cell.col, val: e.key });
       e.preventDefault();
@@ -248,6 +336,7 @@ export const Viewport: Component<ViewportProps> = (props) => {
     }
 
     props.setSelectedCell({ row: newRow, col: newCol });
+    props.setSelectionRange({ startRow: newRow, startCol: newCol, endRow: newRow, endCol: newCol });
     
     // Auto-scroll selected cell into view
     const rect = containerRef.getBoundingClientRect();
@@ -256,14 +345,12 @@ export const Viewport: Component<ViewportProps> = (props) => {
     const cellX = headerWidth + (newCol * defaultColWidth);
     const cellY = headerHeight + (newRow * rowHeight);
 
-    // Vertical boundary checks
     if (cellY < props.scrollY() + headerHeight) {
       props.setScrollY(cellY - headerHeight);
-    } else if (cellY + rowHeight > props.scrollY() + rect.height) {
-      props.setScrollY(cellY + rowHeight - rect.height);
+    } else if (cellY + rowHeight > props.scrollY() + rect.height - 28) {
+      props.setScrollY(cellY + rowHeight - (rect.height - 28));
     }
 
-    // Horizontal boundary checks
     if (cellX < props.scrollX() + headerWidth) {
       props.setScrollX(cellX - headerWidth);
     } else if (cellX + defaultColWidth > props.scrollX() + rect.width) {
@@ -273,40 +360,44 @@ export const Viewport: Component<ViewportProps> = (props) => {
 
   onMount(() => {
     ctx = canvasRef.getContext('2d');
-    
-    // Perform initial canvas sizing
     resizeCanvas();
 
-    // Resize Observer for responsive resizing
     const resizeObserver = new ResizeObserver(() => {
       resizeCanvas();
     });
     resizeObserver.observe(containerRef);
 
-    // Scroll event listener for mousewheel directly on canvas
     canvasRef.addEventListener('wheel', handleWheel, { passive: false });
-    
-    // Keyboard listener on window for navigation when canvas is in focus
+    canvasRef.addEventListener('mousedown', handleMouseDown);
+    canvasRef.addEventListener('mousemove', handleMouseMove);
+    canvasRef.addEventListener('contextmenu', handleContextMenu);
+    window.addEventListener('mouseup', handleMouseUp);
     window.addEventListener('keydown', handleKeyDown);
+
+    const closeMenu = () => setContextMenu(null);
+    window.addEventListener('click', closeMenu);
 
     onCleanup(() => {
       resizeObserver.disconnect();
       canvasRef.removeEventListener('wheel', handleWheel);
+      canvasRef.removeEventListener('mousedown', handleMouseDown);
+      canvasRef.removeEventListener('mousemove', handleMouseMove);
+      canvasRef.removeEventListener('contextmenu', handleContextMenu);
+      window.removeEventListener('mouseup', handleMouseUp);
       window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('click', closeMenu);
       if (rafId !== null) {
         cancelAnimationFrame(rafId);
       }
     });
   });
 
-  // Re-run draw when scroll offsets, selections, or dimensions update
   createEffect(() => {
-    // Register signals as dependencies
     props.scrollX();
     props.scrollY();
     props.selectedCell();
     props.selectedColumn();
-    
+    props.selectionRange();
     requestRedraw();
   });
 
@@ -314,13 +405,12 @@ export const Viewport: Component<ViewportProps> = (props) => {
     <div 
       class="grid-viewport-container" 
       ref={containerRef}
-      style="outline: none;"
+      style="outline: none; position: relative;"
       tabIndex="0"
     >
       <canvas 
         class="grid-canvas" 
         ref={canvasRef}
-        onClick={handleCanvasClick}
         onDblClick={handleCanvasDoubleClick}
       />
 
@@ -379,6 +469,7 @@ export const Viewport: Component<ViewportProps> = (props) => {
         class="scroll-sentinel-y" 
         ref={scrollSentinelYRef}
         onScroll={handleYScroll}
+        style={{ height: 'calc(100% - 28px)' }}
       >
         <div style={{ height: `${totalGridHeight}px`, width: '1px' }}></div>
       </div>
@@ -388,9 +479,250 @@ export const Viewport: Component<ViewportProps> = (props) => {
         class="scroll-sentinel-x" 
         ref={scrollSentinelXRef}
         onScroll={handleXScroll}
-        style={{ left: `${props.dims.headerWidth}px`, width: `calc(100% - ${props.dims.headerWidth}px)` }}
+        style={{ 
+          left: `${props.dims.headerWidth}px`, 
+          width: `calc(100% - ${props.dims.headerWidth}px)`,
+          bottom: '28px'
+        }}
       >
         <div style={{ width: `${totalGridWidth}px`, height: '1px' }}></div>
+      </div>
+
+      {/* Context Menu Component */}
+      <Show when={contextMenu()}>
+        {(menu) => (
+          <div
+            style={{
+              position: 'fixed',
+              left: `${menu().x}px`,
+              top: `${menu().y}px`,
+              background: '#161922',
+              border: '1px solid #232733',
+              'box-shadow': '0 8px 24px rgba(0,0,0,0.5)',
+              'border-radius': '6px',
+              padding: '4px 0',
+              'z-index': '200',
+              'min-width': '155px'
+            }}
+          >
+            <div 
+              style={{
+                padding: '6px 12px',
+                cursor: 'pointer',
+                font: '13px Outfit, sans-serif',
+                color: 'white',
+                display: 'flex',
+                'align-items': 'center',
+                gap: '8px'
+              }}
+              onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(150, 60, 55, 0.15)'}
+              onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
+              onClick={() => {
+                props.setSelectedColumn(menu().col);
+                props.setSelectedCell({ row: menu().row, col: menu().col });
+                props.setShowWizard(true);
+                setContextMenu(null);
+              }}
+            >
+              🧮 Math Wizard
+            </div>
+            
+            <div 
+              style={{
+                padding: '6px 12px',
+                cursor: 'pointer',
+                font: '13px Outfit, sans-serif',
+                color: 'white',
+                display: 'flex',
+                'align-items': 'center',
+                gap: '8px',
+                'border-top': '1px solid #232733'
+              }}
+              onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(150, 60, 55, 0.15)'}
+              onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
+              onClick={() => {
+                const range = props.selectionRange();
+                if (!range) return;
+                const minR = Math.min(range.startRow, range.endRow);
+                const maxR = Math.max(range.startRow, range.endRow);
+                const minC = Math.min(range.startCol, range.endCol);
+                const maxC = Math.max(range.startCol, range.endCol);
+                
+                let text = '';
+                for (let r = minR; r <= maxR; r++) {
+                  const rowCells = [];
+                  for (let c = minC; c <= maxC; c++) {
+                    const val = props.data.getCell(r, c)?.value ?? '';
+                    rowCells.push(String(val));
+                  }
+                  text += rowCells.join('\t') + '\n';
+                }
+                navigator.clipboard.writeText(text.trim());
+                setContextMenu(null);
+              }}
+            >
+              📋 Copy Selection
+            </div>
+
+            <div 
+              style={{
+                padding: '6px 12px',
+                cursor: 'pointer',
+                font: '13px Outfit, sans-serif',
+                color: 'white',
+                display: 'flex',
+                'align-items': 'center',
+                gap: '8px'
+              }}
+              onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(150, 60, 55, 0.15)'}
+              onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
+              onClick={() => {
+                const range = props.selectionRange();
+                if (!range) return;
+                const minR = Math.min(range.startRow, range.endRow);
+                const maxR = Math.max(range.startRow, range.endRow);
+                const minC = Math.min(range.startCol, range.endCol);
+                const maxC = Math.max(range.startCol, range.endCol);
+                
+                for (let r = minR; r <= maxR; r++) {
+                  for (let c = minC; c <= maxC; c++) {
+                    props.onCellCommit?.(r, c, '');
+                  }
+                }
+                setContextMenu(null);
+              }}
+            >
+              🧼 Clear Cells
+            </div>
+
+            <div 
+              style={{
+                padding: '6px 12px',
+                cursor: 'pointer',
+                font: '13px Outfit, sans-serif',
+                color: 'white',
+                display: 'flex',
+                'align-items': 'center',
+                gap: '8px'
+              }}
+              onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(150, 60, 55, 0.15)'}
+              onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
+              onClick={() => {
+                const range = props.selectionRange();
+                if (!range) return;
+                const minR = Math.min(range.startRow, range.endRow);
+                const maxR = Math.max(range.startRow, range.endRow);
+                const minC = Math.min(range.startCol, range.endCol);
+                const maxC = Math.max(range.startCol, range.endCol);
+                
+                for (let r = minR; r <= maxR; r++) {
+                  for (let c = minC; c <= maxC; c++) {
+                    props.onCellCommit?.(r, c, '0');
+                  }
+                }
+                setContextMenu(null);
+              }}
+            >
+              🔢 Fill with Zeroes
+            </div>
+          </div>
+        )}
+      </Show>
+
+      {/* Aggregate Footer Row */}
+      <div 
+        class="grid-aggregate-bar" 
+        style={{
+          position: 'absolute',
+          bottom: '0',
+          left: '0',
+          width: '100%',
+          height: '28px',
+          background: '#161922',
+          'border-top': '1px solid #232733',
+          display: 'flex',
+          'align-items': 'center',
+          'z-index': '15',
+          font: '12px Outfit, sans-serif',
+          'box-sizing': 'border-box'
+        }}
+      >
+        <div style={{
+          width: `${props.dims.headerWidth}px`,
+          height: '100%',
+          background: '#1c1f2b',
+          'border-right': '1px solid #232733',
+          display: 'flex',
+          'align-items': 'center',
+          'justify-content': 'center',
+          color: 'hsl(220, 10%, 70%)',
+          'font-weight': '600',
+          'box-sizing': 'border-box',
+          'user-select': 'none'
+        }}>
+          📊
+        </div>
+
+        <div style={{
+          flex: '1',
+          overflow: 'hidden',
+          position: 'relative',
+          height: '100%'
+        }}>
+          <div style={{
+            display: 'flex',
+            position: 'absolute',
+            left: `${-props.scrollX()}px`,
+            top: '0',
+            height: '100%'
+          }}>
+            <For each={props.schemas}>
+              {(schema, colIdx) => {
+                const colW = props.dims.colWidths[colIdx()] || defaultColWidth;
+                return (
+                  <div style={{
+                    width: `${colW}px`,
+                    height: '100%',
+                    'border-right': '1px solid #232733',
+                    'box-sizing': 'border-box',
+                    display: 'flex',
+                    'align-items': 'center',
+                    'justify-content': 'space-between',
+                    padding: '0 8px',
+                    color: 'white',
+                    background: '#161922'
+                  }}>
+                    <Show
+                      when={schema.type === 'number'}
+                      fallback={<div style="flex: 1;"></div>}
+                    >
+                      <select
+                        value={schema.aggregateOp || ''}
+                        onChange={(e) => {
+                          const val = e.currentTarget.value;
+                          props.onSetColumnAggregate(colIdx(), val ? val : undefined);
+                        }}
+                        style="background: transparent; color: hsl(220, 10%, 70%); border: none; font-size: 11px; outline: none; cursor: pointer; max-width: 50px; font-family: Outfit, sans-serif; padding: 0; margin: 0;"
+                      >
+                        <option value="" style="background: #161922; color: #888;">None</option>
+                        <option value="sum" style="background: #161922; color: white;">Sum</option>
+                        <option value="avg" style="background: #161922; color: white;">Avg</option>
+                        <option value="median" style="background: #161922; color: white;">Mid</option>
+                        <option value="min" style="background: #161922; color: white;">Min</option>
+                        <option value="max" style="background: #161922; color: white;">Max</option>
+                        <option value="count" style="background: #161922; color: white;">Count</option>
+                      </select>
+
+                      <span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: hsl(150, 60%, 55%); font-weight: bold; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: calc(100% - 55px); text-align: right;">
+                        {formatValue(props.getAggregate(colIdx(), schema.aggregateOp))}
+                      </span>
+                    </Show>
+                  </div>
+                );
+              }}
+            </For>
+          </div>
+        </div>
       </div>
     </div>
   );

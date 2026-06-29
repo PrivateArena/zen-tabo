@@ -6,6 +6,13 @@ export interface SelectedCell {
   col: number;
 }
 
+export interface CellRange {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+}
+
 export interface GridDimension {
   colWidths: number[];
   rowHeights: number[];
@@ -35,7 +42,8 @@ export function drawGrid(
   selectedCell: SelectedCell | null,
   selectedColumn: number | null,
   dims: GridDimension,
-  data: GridDataSource
+  data: GridDataSource,
+  selectionRange: CellRange | null
 ) {
   // Clear with background color
   ctx.fillStyle = '#0f1117'; // bg-primary (hsl 220 15% 8%)
@@ -85,9 +93,18 @@ export function drawGrid(
       const isColSelected = selectedColumn === colIdx;
       const isCellSelected = selectedCell && selectedCell.row === rowIdx && selectedCell.col === colIdx;
 
+      // Check selection range
+      const inSelection = selectionRange &&
+        rowIdx >= Math.min(selectionRange.startRow, selectionRange.endRow) &&
+        rowIdx <= Math.max(selectionRange.startRow, selectionRange.endRow) &&
+        colIdx >= Math.min(selectionRange.startCol, selectionRange.endCol) &&
+        colIdx <= Math.max(selectionRange.startCol, selectionRange.endCol);
+
       // Draw cell background
       if (isCellSelected) {
         ctx.fillStyle = '#1e2430'; // Highlight selected cell slightly
+      } else if (inSelection) {
+        ctx.fillStyle = 'rgba(150, 60, 55, 0.12)'; // Range selection highlight
       } else if (isColSelected) {
         ctx.fillStyle = 'rgba(150, 60, 55, 0.06)'; // HSL accent tint
       } else if (rowIdx % 2 === 1) {
@@ -157,10 +174,8 @@ export function drawGrid(
   ctx.lineWidth = 1;
 
   while (drawRowY < height && rowIdxHeader < totalRows) {
-    // Draw row text
     ctx.fillText(String(rowIdxHeader + 1), headerWidth / 2, drawRowY + rowHeight / 2);
     
-    // Draw separator line
     ctx.beginPath();
     ctx.moveTo(0, drawRowY + rowHeight);
     ctx.lineTo(headerWidth, drawRowY + rowHeight);
@@ -184,7 +199,6 @@ export function drawGrid(
   while (drawColX < width && colIdxHeader < totalCols) {
     const colW = colWidths[colIdxHeader] || defaultColWidth;
     
-    // Highlight if selected column
     if (selectedColumn === colIdxHeader) {
       ctx.fillStyle = 'rgba(150, 60, 55, 0.15)';
       ctx.fillRect(drawColX, 0, colW, headerHeight);
@@ -195,7 +209,6 @@ export function drawGrid(
 
     ctx.fillText(data.columnLetter(colIdxHeader), drawColX + colW / 2, headerHeight / 2);
     
-    // Draw separator line
     ctx.beginPath();
     ctx.moveTo(drawColX + colW, 0);
     ctx.lineTo(drawColX + colW, headerHeight);
@@ -214,11 +227,36 @@ export function drawGrid(
   ctx.lineTo(0, headerHeight);
   ctx.stroke();
 
-  // Draw cell selection border
-  if (selectedCell) {
+  // Draw range border or selection border
+  if (selectionRange) {
+    const minR = Math.min(selectionRange.startRow, selectionRange.endRow);
+    const maxR = Math.max(selectionRange.startRow, selectionRange.endRow);
+    const minC = Math.min(selectionRange.startCol, selectionRange.endCol);
+    const maxC = Math.max(selectionRange.startCol, selectionRange.endCol);
+
+    let rangeX = headerWidth;
+    for (let c = 0; c < minC; c++) {
+      rangeX += colWidths[c] || defaultColWidth;
+    }
+    rangeX -= scrollX;
+
+    const rangeY = headerHeight + (minR * rowHeight) - scrollY;
+
+    let rangeW = 0;
+    for (let c = minC; c <= maxC; c++) {
+      rangeW += colWidths[c] || defaultColWidth;
+    }
+
+    const rangeH = (maxR - minR + 1) * rowHeight;
+
+    if (rangeX + rangeW > headerWidth && rangeX < width && rangeY + rangeH > headerHeight && rangeY < height) {
+      ctx.strokeStyle = 'hsl(150, 60%, 55%)'; // Emerald green border
+      ctx.lineWidth = 2;
+      ctx.strokeRect(rangeX, rangeY, rangeW, rangeH);
+    }
+  } else if (selectedCell) {
     const { row, col } = selectedCell;
     
-    // Calculate screen coordinate for selected cell
     let cellX = headerWidth;
     for (let c = 0; c < col; c++) {
       cellX += colWidths[c] || defaultColWidth;
@@ -226,10 +264,8 @@ export function drawGrid(
     cellX -= scrollX;
 
     const cellY = headerHeight + (row * rowHeight) - scrollY;
-
     const colW = colWidths[col] || defaultColWidth;
 
-    // Check if selected cell is in viewport
     if (cellX + colW > headerWidth && cellX < width && cellY + rowHeight > headerHeight && cellY < height) {
       ctx.strokeStyle = 'hsl(150, 60%, 55%)'; // Emerald glow
       ctx.lineWidth = 2;

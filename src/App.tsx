@@ -8,7 +8,7 @@ import { Viewport } from './components/Viewport';
 import { SheetStore } from './core/sheet-store';
 import { DbEngine } from './core/db-engine';
 import { SharedGridMemory } from './core/shared-memory';
-import type { SelectedCell } from './renderer/canvas-fallback';
+import type { SelectedCell, CellRange } from './renderer/canvas-fallback';
 
 function App() {
   // Data layers
@@ -35,6 +35,13 @@ function App() {
   const [scrollY, _setScrollY] = createSignal(0);
   const [selectedCell, _setSelectedCell] = createSignal<SelectedCell | null>({ row: 0, col: 0 });
   const [selectedColumn, _setSelectedColumn] = createSignal<number | null>(null);
+  const [selectionRange, setSelectionRange] = createSignal<CellRange | null>({
+    startRow: 0,
+    startCol: 0,
+    endRow: 0,
+    endCol: 0
+  });
+  const [showWizard, setShowWizard] = createSignal(false);
 
   // Custom setter wraps to write into SharedArrayBuffer atomically for zero-copy sync
   const setScrollX = (x: number) => {
@@ -52,6 +59,12 @@ function App() {
       sharedMem.selectedRow = cell.row;
       sharedMem.selectedCol = cell.col;
       _setSelectedCell({ row: cell.row, col: cell.col });
+      setSelectionRange({
+        startRow: cell.row,
+        startCol: cell.col,
+        endRow: cell.row,
+        endCol: cell.col
+      });
       
       // Load value or formula into formula bar
       const cellData = store.getCell(cell.row, cell.col);
@@ -59,7 +72,12 @@ function App() {
       if (override && override.formula) {
         setFormulaText(override.formula);
       } else {
-        setFormulaText(String(cellData.value));
+        const schema = store.schemas[cell.col];
+        if (schema && schema.formula) {
+          setFormulaText('=' + store.toDisplayFormula(schema.formula));
+        } else {
+          setFormulaText(String(cellData.value));
+        }
       }
     } else {
       _setSelectedCell(null);
@@ -427,6 +445,20 @@ function App() {
         setFormulaText={setFormulaText}
         onFormulaSubmit={handleFormulaSubmit}
         columnLetter={store.columnLetter}
+        schemas={store.schemas}
+        onSetColumnFormula={(colIdx, formula) => {
+          const ok = store.setColumnFormula(colIdx, formula);
+          setTriggerRedraw(prev => prev + 1);
+          if (selectedColumn() !== null) {
+            updateStats(selectedColumn()!);
+          } else {
+            updateStats(colIdx);
+          }
+          syncToDuckDB();
+          return ok;
+        }}
+        showWizard={showWizard}
+        setShowWizard={setShowWizard}
       />
 
       {/* 3. Main Workspace */}
@@ -441,6 +473,8 @@ function App() {
           setSelectedCell={setSelectedCell}
           selectedColumn={selectedColumn}
           setSelectedColumn={setSelectedColumn}
+          selectionRange={selectionRange}
+          setSelectionRange={setSelectionRange}
           dims={{
             colWidths: new Array(store.totalCols).fill(110),
             rowHeights: new Array(store.totalRows).fill(26),
@@ -461,6 +495,19 @@ function App() {
           onCellCommit={(r, c, val) => {
             setCellWithHistory(r, c, val);
           }}
+          schemas={store.schemas}
+          getAggregate={(colIdx, op) => {
+            triggerRedraw();
+            if (!op) return '';
+            return store.lastAggregates[colIdx]?.[op] ?? '';
+          }}
+          onSetColumnAggregate={(colIdx, op) => {
+            store.setColumnAggregate(colIdx, op);
+            setTriggerRedraw(prev => prev + 1);
+            syncToDuckDB();
+          }}
+          showWizard={showWizard}
+          setShowWizard={setShowWizard}
         />
 
         {/* Sidebar analytics and SQL panels */}
