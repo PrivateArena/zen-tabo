@@ -74,6 +74,7 @@ export const Viewport: Component<ViewportProps> = (props) => {
   const resizeCanvas = () => {
     if (!ctx || !canvasRef || !containerRef) return;
     const rect = containerRef.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
     const dpr = window.devicePixelRatio || 1;
     
     canvasRef.width = rect.width * dpr;
